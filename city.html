@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Procedural City with Drivable Car & Fog</title>
+    <style>
+        body { margin: 0; overflow: hidden; font-family: 'Inter', sans-serif; }
+        canvas { display: block; }
+        #loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 24px;
+            color: #333;
+        }
+        #toggleCameraButton {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            padding: 10px 15px;
+            font-size: 16px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            z-index: 100; /* Ensure it's on top */
+        }
+        #toggleCameraButton:hover {
+            background-color: #45a049;
+        }
+    </style>
+</head>
+<body>
+    <div id="loading">Loading City...</div>
+    <button id="toggleCameraButton">Toggle Camera (Overview)</button>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.132.2/build/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.132.2/examples/js/controls/OrbitControls.js"></script>
+    <script>
+        // Scene setup
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x87CEEB); // Sky blue background
+
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 2000);
+        const overviewCameraPosition = new THREE.Vector3(80, 120, 80);
+        const overviewCameraFar = camera.far; // Store initial far value
+        camera.position.copy(overviewCameraPosition);
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+        document.body.appendChild(renderer.domElement);
+
+        // Controls
+        const controls = new THREE.OrbitControls(camera, renderer.domElement);
+        const overviewControlsTarget = new THREE.Vector3(0, 0, 0);
+        controls.target.copy(overviewControlsTarget);
+        controls.enableDamping = true;
+        controls.dampingFactor = 0.05;
+        controls.minDistance = 15;
+        controls.maxDistance = 800;
+
+        // City parameters (same as before)
+        const cityParams = {
+            mainGridSize: 6, blockSize: 20, subdivisionsPerBlock: 2, roadWidth: 2.5, roadHeight: 0.1,
+            numBranches: 8, branchGridSize: 3, branchDistance: 140, branchVariation: 60,
+            buildingDensity: { downtown: 0.85, branch: 0.55, suburban: 0.25 },
+            floorRanges: { downtown: { min: 3, max: 12 }, branch: { min: 1, max: 6 }, suburban: { min: 1, max: 3 } },
+            floorHeight: 2.8, buildingFootprintFactor: 0.75,
+            colors: { walls: [0xC2B280, 0xD3D3D3, 0xCD853F, 0x778899, 0xBDB76B, 0xFFC0CB], roofs: [0x8B0000, 0x2F4F4F, 0x556B2F, 0x4682B4, 0x800000], window: 0xADD8E6, door: 0x8B4513, road: 0x444444, ground: 0x556B2F },
+            vegetation: { treeDensity: 0.15, bushDensity: 0.25, trunkHeight: { min: 3, max: 6 }, trunkRadius: { min: 0.2, max: 0.4 }, trunkColor: 0x8B4513, coneHeight: { min: 4, max: 8 }, coneRadius: { min: 1.5, max: 3 }, coneColor: 0x228B22, bushClusterSize: { min: 3, max: 7 }, bushSphereSize: { min: 0.5, max: 1.2 }, bushColor: 0x32CD32 }
+        };
+
+        const cityDistricts = [];
+        const vacantPlots = [];
+
+        // --- Car Variables ---
+        let car = null;
+        const carSpeed = 0.7;
+        const carRotationSpeed = 0.035;
+        const keysPressed = { ArrowUp: false, ArrowDown: false, ArrowLeft: false, ArrowRight: false };
+        let cameraMode = 'overview'; // 'overview' or 'car'
+        const carCameraOffset = new THREE.Vector3(0, 4, -8); // Camera position relative to car
+
+        // --- Fog and Draw Distance Parameters for Car Mode ---
+        const carModeFogNear = cityParams.blockSize * 1;    // Fog starts at 1 block (20 units)
+        const carModeFogFar = cityParams.blockSize * 4;     // Fog fully opaque at 4 blocks (80 units)
+        const carModeCameraFar = cityParams.blockSize * 6;  // Camera culls objects beyond 6 blocks (120 units)
+
+
+        // --- Helper function to get random color ---
+        function getRandomColor(colorArray) {
+            return colorArray[Math.floor(Math.random() * colorArray.length)];
+        }
+
+        generateCity();
+        createCar(); 
+
+        const loadingElement = document.getElementById('loading');
+        if (loadingElement) {
+            loadingElement.style.display = 'none';
+        }
+        
+        const toggleButton = document.getElementById('toggleCameraButton');
+        toggleButton.addEventListener('click', toggleCameraMode);
+
+        function toggleCameraMode() {
+            if (cameraMode === 'overview') {
+                cameraMode = 'car';
+                controls.enabled = false;
+                toggleButton.textContent = 'Toggle Camera (Car View)';
+
+                // Add fog and set camera far clip for car mode
+                scene.fog = new THREE.Fog(scene.background, carModeFogNear, carModeFogFar);
+                camera.far = carModeCameraFar;
+                camera.updateProjectionMatrix(); // IMPORTANT: Update projection matrix after changing camera.far
+
+            } else { // Switching to 'overview'
+                cameraMode = 'overview';
+                controls.enabled = true;
+                camera.position.copy(overviewCameraPosition);
+                controls.target.copy(overviewControlsTarget); 
+                camera.lookAt(overviewControlsTarget);
+                toggleButton.textContent = 'Toggle Camera (Overview)';
+
+                // Remove fog and restore camera far clip for overview mode
+                scene.fog = null; 
+                camera.far = overviewCameraFar;
+                camera.updateProjectionMatrix(); // IMPORTANT: Update projection matrix
+            }
+            if (controls.enabled) {
+                controls.update();
+            }
+        }
+
+        // --- Car Creation (same as before) ---
+        function createCar() {
+            car = new THREE.Group();
+            const carBodyHeight = 1;
+            const carWheelRadius = 0.4;
+            const carWheelYOffset = -(carBodyHeight / 2 - carWheelRadius * 0.5) + cityParams.roadHeight;
+
+            const bodyGeometry = new THREE.BoxGeometry(2, carBodyHeight, 4); 
+            const bodyMaterial = new THREE.MeshStandardMaterial({ color: 0xff0000, roughness: 0.5, metalness: 0.3 });
+            const mainBody = new THREE.Mesh(bodyGeometry, bodyMaterial);
+            mainBody.castShadow = true; mainBody.receiveShadow = true; car.add(mainBody);
+
+            const cabinGeometry = new THREE.BoxGeometry(1.8, 0.8, 2);
+            const cabinMaterial = new THREE.MeshStandardMaterial({ color: 0xcc0000, roughness: 0.6 });
+            const cabin = new THREE.Mesh(cabinGeometry, cabinMaterial);
+            cabin.position.set(0, carBodyHeight / 2 + 0.8 / 2 - 0.2, -0.3); 
+            cabin.castShadow = true; car.add(cabin);
+
+            const wheelGeometry = new THREE.CylinderGeometry(carWheelRadius, carWheelRadius, 0.3, 16);
+            const wheelMaterial = new THREE.MeshStandardMaterial({ color: 0x111111, roughness: 0.8 });
+            const wheelPositions = [
+                { x: 1.1, y: carWheelYOffset, z: 1.3 }, { x: -1.1, y: carWheelYOffset, z: 1.3 },
+                { x: 1.1, y: carWheelYOffset, z: -1.3 }, { x: -1.1, y: carWheelYOffset, z: -1.3 }
+            ];
+            wheelPositions.forEach(pos => {
+                const wheel = new THREE.Mesh(wheelGeometry, wheelMaterial);
+                wheel.rotation.z = Math.PI / 2; wheel.position.set(pos.x, pos.y, pos.z);
+                wheel.castShadow = true; car.add(wheel);
+            });
+            car.position.set(0, carBodyHeight / 2 + carWheelRadius - carWheelYOffset , 15); 
+            car.rotation.y = Math.PI; 
+            scene.add(car);
+        }
+
+        // --- Car Controls (same as before) ---
+        document.addEventListener('keydown', (event) => {
+            if (keysPressed.hasOwnProperty(event.key)) keysPressed[event.key] = true;
+        });
+        document.addEventListener('keyup', (event) => {
+            if (keysPressed.hasOwnProperty(event.key)) keysPressed[event.key] = false;
+        });
+        function updateCarMovement() {
+            if (!car) return;
+            if (keysPressed.ArrowUp) car.translateZ(carSpeed);
+            if (keysPressed.ArrowDown) car.translateZ(-carSpeed * 0.7);
+            if (keysPressed.ArrowLeft) car.rotation.y += carRotationSpeed;
+            if (keysPressed.ArrowRight) car.rotation.y -= carRotationSpeed;
+        }
+
+        // --- City Generation Functions (unchanged from your previous version) ---
+        function generateCity() {
+            const totalCitySize = cityParams.branchDistance * 2.5;
+            const groundMaterial = new THREE.MeshStandardMaterial({ color: cityParams.colors.ground, roughness: 0.9 });
+            const ground = new THREE.Mesh(
+                new THREE.PlaneGeometry(totalCitySize, totalCitySize),
+                groundMaterial
+            );
+            ground.rotation.x = -Math.PI / 2;
+            ground.receiveShadow = true;
+            scene.add(ground);
+
+            generateGrid(0, 0, cityParams.mainGridSize, cityParams.mainGridSize);
+            cityDistricts.push({ centerX: 0, centerZ: 0, gridSizeX: cityParams.mainGridSize, gridSizeZ: cityParams.mainGridSize, type: 'downtown' });
+            generateBranchingDistricts();
+            generateSuburbanConnections();
+            generateAllBuildings();
+            addVegetation();
+        }
+
+        function generateBranchingDistricts() {
+            const angleStep = (Math.PI * 2) / cityParams.numBranches;
+            for (let i = 0; i < cityParams.numBranches; i++) {
+                const angle = i * angleStep + (Math.random() - 0.5) * 0.5;
+                const distance = cityParams.branchDistance + (Math.random() - 0.5) * cityParams.branchVariation;
+                const branchX = Math.cos(angle) * distance;
+                const branchZ = Math.sin(angle) * distance;
+                const branchSize = 2 + Math.floor(Math.random() * 3);
+                generateGrid(branchX, branchZ, branchSize, branchSize);
+                cityDistricts.push({ centerX: branchX, centerZ: branchZ, gridSizeX: branchSize, gridSizeZ: branchSize, type: 'branch' });
+                generateConnectingRoad(0, 0, branchX, branchZ);
+            }
+        }
+
+        function generateSuburbanConnections() {
+            const numSuburban = Math.floor(cityParams.numBranches * 1.5);
+            for (let i = 0; i < numSuburban; i++) {
+                const angle = Math.random() * Math.PI * 2;
+                const distance = cityParams.branchDistance * 0.6 + Math.random() * cityParams.branchDistance * 0.4;
+                const suburbX = Math.cos(angle) * distance;
+                const suburbZ = Math.sin(angle) * distance;
+                const suburbSize = 2 + Math.floor(Math.random() * 2);
+                generateGrid(suburbX, suburbZ, suburbSize, suburbSize);
+                cityDistricts.push({ centerX: suburbX, centerZ: suburbZ, gridSizeX: suburbSize, gridSizeZ: suburbSize, type: 'suburban' });
+            }
+        }
+
+        function generateConnectingRoad(startX, startZ, endX, endZ) {
+            const roadMaterial = new THREE.MeshStandardMaterial({ color: cityParams.colors.road, roughness: 0.9 });
+            const totalDistance = Math.sqrt((endX - startX) ** 2 + (endZ - startZ) ** 2);
+            const angle = Math.atan2(endZ - startZ, endX - startX);
+            const roadLength = totalDistance;
+            const roadGeometry = new THREE.BoxGeometry(roadLength, cityParams.roadHeight, cityParams.roadWidth);
+            const road = new THREE.Mesh(roadGeometry, roadMaterial);
+            const midX = (startX + endX) / 2;
+            const midZ = (startZ + endZ) / 2;
+            road.position.set(midX, cityParams.roadHeight / 2, midZ);
+            road.rotation.y = angle;
+            road.receiveShadow = true;
+            scene.add(road);
+        }
+        
+        function generateAllBuildings() {
+            cityDistricts.forEach(district => {
+                generateBuildingsForDistrict(district);
+            });
+        }
+
+        function generateBuildingsForDistrict(district) {
+            const mainHalfGridBlocks = district.gridSizeX / 2;
+            const subPlotSize = cityParams.blockSize / cityParams.subdivisionsPerBlock;
+            const density = cityParams.buildingDensity[district.type];
+            const floorRange = cityParams.floorRanges[district.type];
+
+            for (let blockI = -mainHalfGridBlocks; blockI < mainHalfGridBlocks; blockI++) {
+                for (let blockJ = -mainHalfGridBlocks; blockJ < mainHalfGridBlocks; blockJ++) {
+                    const mainBlockCenterX = district.centerX + blockI * cityParams.blockSize + cityParams.blockSize / 2;
+                    const mainBlockCenterZ = district.centerZ + blockJ * cityParams.blockSize + cityParams.blockSize / 2;
+                    for (let subI = 0; subI < cityParams.subdivisionsPerBlock; subI++) {
+                        for (let subJ = 0; subJ < cityParams.subdivisionsPerBlock; subJ++) {
+                            const subPlotOffsetX = (subI - (cityParams.subdivisionsPerBlock - 1) / 2) * subPlotSize;
+                            const subPlotOffsetZ = (subJ - (cityParams.subdivisionsPerBlock - 1) / 2) * subPlotSize;
+                            const buildingCenterX = mainBlockCenterX + subPlotOffsetX;
+                            const buildingCenterZ = mainBlockCenterZ + subPlotOffsetZ;
+                            if (Math.random() < density) {
+                                createBuilding(buildingCenterX, buildingCenterZ, subPlotSize, floorRange);
+                            } else {
+                                vacantPlots.push({ x: buildingCenterX, z: buildingCenterZ, size: subPlotSize * cityParams.buildingFootprintFactor, districtType: district.type });
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        function createBuilding(centerX, centerZ, allocatedSpace, floorRange) {
+            const widthVariation = 0.7 + Math.random() * 0.3;
+            const depthVariation = 0.7 + Math.random() * 0.3;
+            const baseWidth = allocatedSpace * cityParams.buildingFootprintFactor * widthVariation;
+            const baseDepth = allocatedSpace * cityParams.buildingFootprintFactor * depthVariation;
+            const floors = Math.floor(Math.random() * (floorRange.max - floorRange.min + 1)) + floorRange.min;
+            const totalHeight = floors * cityParams.floorHeight;
+
+            const wallColor = getRandomColor(cityParams.colors.walls);
+            const roofColor = getRandomColor(cityParams.colors.roofs);
+            const buildingMaterial = new THREE.MeshStandardMaterial({ color: wallColor, roughness: 0.8, metalness: 0.1 });
+            const roofMaterial = new THREE.MeshStandardMaterial({ color: roofColor, roughness: 0.7 });
+            const windowMaterial = new THREE.MeshStandardMaterial({ color: cityParams.colors.window, roughness: 0.2, transparent: true, opacity: 0.6 });
+            const doorMaterial = new THREE.MeshStandardMaterial({ color: cityParams.colors.door, roughness: 0.8 });
+
+            const building = new THREE.Group();
+            const baseGeometry = new THREE.BoxGeometry(baseWidth, totalHeight, baseDepth);
+            const baseMesh = new THREE.Mesh(baseGeometry, buildingMaterial);
+            baseMesh.castShadow = true; baseMesh.receiveShadow = true; baseMesh.position.y = totalHeight / 2;
+            building.add(baseMesh);
+
+            const roofType = Math.random();
+            if (roofType < 0.6) {
+                const roofGeometry = new THREE.BoxGeometry(baseWidth * 1.05, cityParams.floorHeight * 0.2, baseDepth * 1.05);
+                const roofMesh = new THREE.Mesh(roofGeometry, roofMaterial);
+                roofMesh.position.set(0, totalHeight + (cityParams.floorHeight * 0.2)/2, 0);
+                roofMesh.castShadow = true; building.add(roofMesh);
+            } else {
+                 const roofHeight = cityParams.floorHeight * 0.7;
+                 const roofGeometry = new THREE.CylinderGeometry(0, Math.min(baseWidth, baseDepth) * 0.7, roofHeight, 4, 1);
+                 const roofMesh = new THREE.Mesh(roofGeometry, roofMaterial);
+                 roofMesh.rotation.y = Math.PI / 4;
+                 roofMesh.position.set(0, totalHeight + roofHeight / 2, 0);
+                 roofMesh.castShadow = true; building.add(roofMesh);
+            }
+            addDetails(building, baseWidth, totalHeight, baseDepth, floors, windowMaterial, doorMaterial);
+            const rotations = [0, Math.PI / 2, Math.PI, Math.PI * 1.5];
+            building.rotation.y = rotations[Math.floor(Math.random() * rotations.length)];
+            building.position.set(centerX, 0, centerZ);
+            scene.add(building);
+        }
+
+        function addDetails(buildingGroup, bWidth, bHeight, bDepth, numFloors, windowMat, doorMat) {
+            const windowWidth = bWidth * 0.18; const windowHeight = cityParams.floorHeight * 0.35; const windowDepth = 0.1;
+            for (let floor = 0; floor < numFloors; floor++) {
+                const currentFloorCenterY = (floor * cityParams.floorHeight) + (cityParams.floorHeight / 2);
+                if (bWidth > windowWidth * 2.5) {
+                    for (let i = -1; i <= 1; i += 2) {
+                        const windowX = bWidth * 0.28 * i;
+                        const windowFront = new THREE.Mesh(new THREE.BoxGeometry(windowWidth, windowHeight, windowDepth), windowMat);
+                        windowFront.position.set(windowX, currentFloorCenterY, bDepth / 2 + windowDepth/2); buildingGroup.add(windowFront);
+                        const windowBack = windowFront.clone(); windowBack.position.z = -bDepth / 2 - windowDepth/2; buildingGroup.add(windowBack);
+                    }
+                } else {
+                     const windowFront = new THREE.Mesh(new THREE.BoxGeometry(windowWidth, windowHeight, windowDepth), windowMat);
+                     windowFront.position.set(0, currentFloorCenterY, bDepth / 2 + windowDepth/2); buildingGroup.add(windowFront);
+                     const windowBack = windowFront.clone(); windowBack.position.z = -bDepth / 2 - windowDepth/2; buildingGroup.add(windowBack);
+                }
+                if (bDepth > windowWidth * 2.5) {
+                     for (let i = -1; i <= 1; i += 2) {
+                        const windowZ = bDepth * 0.28 * i;
+                        const windowSide = new THREE.Mesh(new THREE.BoxGeometry(windowDepth, windowHeight, windowWidth), windowMat);
+                        windowSide.position.set(bWidth / 2 + windowDepth/2, currentFloorCenterY, windowZ); buildingGroup.add(windowSide);
+                        const windowSide2 = windowSide.clone(); windowSide2.position.x = -bWidth / 2 - windowDepth/2; buildingGroup.add(windowSide2);
+                    }
+                }
+            }
+            const doorWidth = bWidth * 0.25; const doorHeight = cityParams.floorHeight * 0.65;
+            const door = new THREE.Mesh(new THREE.BoxGeometry(doorWidth, doorHeight, 0.15), doorMat);
+            door.position.set(0, doorHeight / 2, bDepth / 2 + 0.075); door.castShadow = true; buildingGroup.add(door);
+        }
+        
+        function generateGrid(gridCenterX, gridCenterZ, numBlocksX, numBlocksZ) {
+            const totalGridWidth = numBlocksX * cityParams.blockSize; const totalGridDepth = numBlocksZ * cityParams.blockSize;
+            const startX = gridCenterX - totalGridWidth / 2; const startZ = gridCenterZ - totalGridDepth / 2;
+            const roadMaterial = new THREE.MeshStandardMaterial({ color: cityParams.colors.road, roughness: 0.9 });
+            for (let i = 0; i <= numBlocksZ; i++) {
+                const currentZ = startZ + i * cityParams.blockSize;
+                const road = new THREE.Mesh(new THREE.BoxGeometry(totalGridWidth + cityParams.roadWidth, cityParams.roadHeight, cityParams.roadWidth), roadMaterial);
+                road.position.set(gridCenterX, cityParams.roadHeight / 2, currentZ); road.receiveShadow = true; scene.add(road);
+            }
+            for (let j = 0; j <= numBlocksX; j++) {
+                const currentX = startX + j * cityParams.blockSize;
+                const road = new THREE.Mesh(new THREE.BoxGeometry(cityParams.roadWidth, cityParams.roadHeight, totalGridDepth + cityParams.roadWidth), roadMaterial);
+                road.position.set(currentX, cityParams.roadHeight / 2, gridCenterZ); road.receiveShadow = true; scene.add(road);
+            }
+        }
+
+        function addVegetation() {
+            const vegParams = cityParams.vegetation;
+            vacantPlots.forEach(plot => {
+                let treeChance = vegParams.treeDensity; let bushChance = vegParams.bushDensity;
+                if (plot.districtType === 'downtown') { treeChance *= 0.5; bushChance *= 0.7; }
+                else if (plot.districtType === 'suburban') { treeChance *= 1.5; bushChance *= 1.3; }
+                if (Math.random() < treeChance) { createTree(plot.x, plot.z, plot.size); }
+                else if (Math.random() < bushChance) { createBush(plot.x, plot.z, plot.size); }
+            });
+        }
+
+        function createTree(x, z, plotSize) {
+            const vegParams = cityParams.vegetation; const tree = new THREE.Group();
+            const trunkHeight = vegParams.trunkHeight.min + Math.random() * (vegParams.trunkHeight.max - vegParams.trunkHeight.min);
+            const trunkRadius = vegParams.trunkRadius.min + Math.random() * (vegParams.trunkRadius.max - vegParams.trunkRadius.min);
+            const trunkGeometry = new THREE.CylinderGeometry(trunkRadius, trunkRadius, trunkHeight, 8);
+            const trunkMaterial = new THREE.MeshStandardMaterial({ color: vegParams.trunkColor, roughness: 0.9, metalness: 0.1 });
+            const trunk = new THREE.Mesh(trunkGeometry, trunkMaterial);
+            trunk.position.y = trunkHeight / 2; trunk.castShadow = true; trunk.receiveShadow = true; tree.add(trunk);
+            if (Math.random() < 0.6) {
+                const coneHeight = vegParams.coneHeight.min + Math.random() * (vegParams.coneHeight.max - vegParams.coneHeight.min);
+                const coneRadius = vegParams.coneRadius.min + Math.random() * (vegParams.coneRadius.max - vegParams.coneRadius.min);
+                const coneGeometry = new THREE.ConeGeometry(coneRadius, coneHeight, 8);
+                const coneMaterial = new THREE.MeshStandardMaterial({ color: vegParams.coneColor, roughness: 0.7, metalness: 0.0 });
+                const cone = new THREE.Mesh(coneGeometry, coneMaterial);
+                cone.position.y = trunkHeight + coneHeight / 2; cone.castShadow = true; tree.add(cone);
+            } else {
+                const clusterSize = vegParams.bushClusterSize.min + Math.floor(Math.random() * (vegParams.bushClusterSize.max - vegParams.bushClusterSize.min));
+                for (let i = 0; i < clusterSize; i++) {
+                    const sphereSize = vegParams.bushSphereSize.min + Math.random() * (vegParams.bushSphereSize.max - vegParams.bushSphereSize.min);
+                    const sphereGeometry = new THREE.SphereGeometry(sphereSize, 8, 8);
+                    const sphereMaterial = new THREE.MeshStandardMaterial({ color: vegParams.coneColor, roughness: 0.8, metalness: 0.0 });
+                    const sphere = new THREE.Mesh(sphereGeometry, sphereMaterial);
+                    sphere.position.set((Math.random() - 0.5) * trunkRadius * 4, trunkHeight + (Math.random() * sphereSize * 2), (Math.random() - 0.5) * trunkRadius * 4);
+                    sphere.castShadow = true; tree.add(sphere);
+                }
+            }
+            const plotRadius = plotSize * 0.4;
+            tree.position.set(x + (Math.random() - 0.5) * plotRadius * 2, 0, z + (Math.random() - 0.5) * plotRadius * 2);
+            tree.rotation.y = Math.random() * Math.PI * 2; scene.add(tree);
+        }
+
+        function createBush(x, z, plotSize) {
+            const vegParams = cityParams.vegetation; const bush = new THREE.Group();
+            const clusterSize = vegParams.bushClusterSize.min + Math.floor(Math.random() * (vegParams.bushClusterSize.max - vegParams.bushClusterSize.min));
+            for (let i = 0; i < clusterSize; i++) {
+                const sphereSize = vegParams.bushSphereSize.min + Math.random() * (vegParams.bushSphereSize.max - vegParams.bushSphereSize.min);
+                const sphereGeometry = new THREE.SphereGeometry(sphereSize, 8, 8);
+                const sphereMaterial = new THREE.MeshStandardMaterial({ color: vegParams.bushColor, roughness: 0.8, metalness: 0.0 });
+                const sphere = new THREE.Mesh(sphereGeometry, sphereMaterial);
+                sphere.position.set((Math.random() - 0.5) * sphereSize * 3, sphereSize * 0.8, (Math.random() - 0.5) * sphereSize * 3);
+                sphere.castShadow = true; bush.add(sphere);
+            }
+            const plotRadius = plotSize * 0.4;
+            bush.position.set(x + (Math.random() - 0.5) * plotRadius * 2, 0, z + (Math.random() - 0.5) * plotRadius * 2);
+            scene.add(bush);
+        }
+
+
+        // Lighting
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.6); scene.add(ambientLight);
+        const sunLight = new THREE.DirectionalLight(0xffffff, 1.2);
+        sunLight.position.set(-200, 300, -150); sunLight.castShadow = true;
+        sunLight.shadow.mapSize.width = 2048; sunLight.shadow.mapSize.height = 2048;
+        sunLight.shadow.camera.near = 10; sunLight.shadow.camera.far = 800; // This is for shadow camera, not main camera
+        sunLight.shadow.camera.left = -400; sunLight.shadow.camera.right = 400;
+        sunLight.shadow.camera.top = 400; sunLight.shadow.camera.bottom = -400;
+        sunLight.shadow.bias = -0.0005; scene.add(sunLight);
+        
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        // Animation loop
+        function animate() {
+            requestAnimationFrame(animate);
+            if (car) updateCarMovement(); 
+
+            if (cameraMode === 'overview') {
+                controls.update(); 
+            } else if (cameraMode === 'car' && car) {
+                const relativeCameraOffset = carCameraOffset.clone();
+                const cameraTarget = new THREE.Vector3();
+                camera.position.copy(car.position).add(relativeCameraOffset.applyQuaternion(car.quaternion));
+                cameraTarget.copy(car.position).add(new THREE.Vector3(0, 1.5, 0)); 
+                camera.lookAt(cameraTarget);
+            }
+            renderer.render(scene, camera);
+        }
+        
+        if (typeof THREE !== 'undefined' && typeof THREE.OrbitControls !== 'undefined') {
+            animate();
+        } else {
+            console.error("Three.js or OrbitControls not loaded. Animation not started.");
+            const loadingElem = document.getElementById('loading');
+            if(loadingElem) loadingElem.textContent = "Error loading 3D library.";
+        }
+    </script>
+</body>
+</html>
